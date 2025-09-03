@@ -9,8 +9,8 @@ import io
 # Create a Flask web server instance
 app = Flask(__name__)
 
-# Enable CORS for all origins and methods
-CORS(app)
+# Enable CORS for all origins, allowing requests from any domain.
+CORS(app, resources={r"/analyze_ct_scan": {"origins": "*"}})
 
 # Function to manually assess malignancy based on visual features
 def assess_malignancy_manually(image_array, mask_array):
@@ -107,12 +107,16 @@ def process_image_and_mask(image_data, mask_data=None):
         return None
 
 # The endpoint for the CT scan analysis
-@app.route('/analyze_ct_scan', methods=['POST'])
+@app.route('/analyze_ct_scan', methods=['POST', 'OPTIONS'])
 def analyze_ct_scan():
     """
     Handles the POST request for CT scan analysis.
     """
     print("Received a request to analyze a CT scan.")
+
+    if request.method == 'OPTIONS':
+        # This handles the preflight request for CORS
+        return jsonify({}), 200
 
     try:
         data = request.get_json()

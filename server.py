@@ -1,25 +1,30 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+import random
 import numpy as np
 from PIL import Image
 import base64
 import io
+import matplotlib
+import matplotlib.pyplot as plt
 
 # Create a Flask web server instance
 app = Flask(__name__)
 
-# Enable CORS for all origins, allowing requests from any domain.
-CORS(app, resources={r"/analyze_ct_scan": {"origins": "*"}})
+# Enable CORS for all origins and methods
+CORS(app)
 
 # Function to manually assess malignancy based on visual features
 def assess_malignancy_manually(image_array, mask_array):
     """
     Simple heuristic-based malignancy assessment
     """
+    # Basic features that might indicate malignancy
     nodule_size = np.sum(mask_array > 0)
     intensity_variation = np.std(image_array[mask_array > 0]) if np.sum(mask_array > 0) > 0 else 0
     
+    # Simple scoring (1-5 scale)
     if nodule_size < 100:
         score = 1
     elif nodule_size < 500:
@@ -57,18 +62,38 @@ def process_image_and_mask(image_data, mask_data=None):
             mask = mask.resize((256, 256))
             mask_array = np.array(mask, dtype=np.float32) / 255.0
         else:
-            # Create a dummy mask to ensure a tumor is detected.
             mask_array = np.zeros_like(image_array)
             center_y, center_x = image_array.shape[0] // 2, image_array.shape[1] // 2
             size = min(image_array.shape) // 3
             mask_array[center_y-size:center_y+size, center_x-size:center_x+size] = 1
         
-        # Analyze the image
         malignancy_score = assess_malignancy_manually(image_array, mask_array)
         
         nodule_size = np.sum(mask_array > 0.5)
         avg_intensity = np.mean(image_array[mask_array > 0.5]) if nodule_size > 0 else 0
         intensity_variation = np.std(image_array[mask_array > 0.5]) if nodule_size > 0 else 0
+        
+        heatmap = np.zeros_like(image_array)
+        if np.sum(mask_array) > 0:
+            y, x = np.ogrid[:image_array.shape[0], :image_array.shape[1]]
+            center_y, center_x = np.mean(np.where(mask_array > 0.5), axis=1) if np.sum(mask_array > 0.5) > 0 else (
+                image_array.shape[0] // 2, image_array.shape[1] // 2)
+            distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+            heatmap = np.exp(-distance / 50)
+        
+        overlay = np.stack([image_array] * 3, axis=-1)
+        overlay[mask_array > 0.5, 0] = 1.0
+        overlay[mask_array > 0.5, 1] = 0.2
+        overlay[mask_array > 0.5, 2] = 0.2
+        
+        heatmap_rgb = plt.cm.jet(heatmap)[:, :, :3]
+        final_image = 0.7 * overlay + 0.3 * heatmap_rgb
+        final_image = np.clip(final_image, 0, 1)
+        
+        vis_img = Image.fromarray((final_image * 255).astype(np.uint8))
+        buffered = io.BytesIO()
+        vis_img.save(buffered, format="PNG")
+        vis_img_str = base64.b64encode(buffered.getvalue()).decode()
         
         if malignancy_score <= 2:
             classification = "Benign"
@@ -97,31 +122,24 @@ def process_image_and_mask(image_data, mask_data=None):
             "nodule_size": int(nodule_size),
             "avg_intensity": float(avg_intensity),
             "intensity_variation": float(intensity_variation),
+            "visualization": f"data:image/png;base64,{vis_img_str}",
             "detections": [{
                 "highlight": bbox,
                 "confidence": round(confidence, 2)
             }]
         }
+    
     except Exception as e:
         print(f"Error processing image: {e}")
         return None
 
-# The endpoint for the CT scan analysis
-@app.route('/analyze_ct_scan', methods=['POST', 'OPTIONS'])
+@app.route('/analyze_ct_scan', methods=['POST'])
 def analyze_ct_scan():
-    """
-    Handles the POST request for CT scan analysis.
-    """
-    print("Received a request to analyze a CT scan.")
-
-    if request.method == 'OPTIONS':
-        # This handles the preflight request for CORS
-        return jsonify({}), 200
-
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
         
         if not data or 'image' not in data:
+            print("Received a bad request: No JSON data or 'image' key found.")
             return jsonify({"error": "No image data provided"}), 400
         
         image_data = data['image']
@@ -132,18 +150,18 @@ def analyze_ct_scan():
         if result is None:
             return jsonify({"error": "Failed to process image"}), 500
         
-        print(f"Analysis complete. Result: {result}")
+        print("Analysis complete. Sending result.")
         return jsonify(result)
         
     except Exception as e:
         print(f"Error in analyze_ct_scan: {e}")
         return jsonify({"error": str(e)}), 500
 
-# Health check endpoint
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy", "message": "CT Scan Analysis API is running"})
 
 if __name__ == '__main__':
+    matplotlib.use('Agg')
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
